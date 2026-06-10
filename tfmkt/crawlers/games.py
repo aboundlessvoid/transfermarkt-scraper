@@ -101,6 +101,16 @@ async def run(parents_arg=None, season=2024, base_url=None):
             if gesamtspielplan_links:
                 next_url = gesamtspielplan_links[0].xpath('@href').get()
 
+        # Final fallback for tournament editions (pokalwettbewerb): the edition
+        # `startseite` page exposes neither an "All games" footer nor a
+        # gesamtspielplan link, but the schedule lives at the same path with
+        # `/startseite/` swapped for `/gesamtspielplan/` (e.g. Copa America,
+        # World Cup). Derive it directly from the parent edition href.
+        if not next_url:
+            parent_href = parent.get('href', '')
+            if '/startseite/' in parent_href:
+                next_url = parent_href.replace('/startseite/', '/gesamtspielplan/')
+
         if next_url:
             await context.add_requests([
                 Request.from_url(
