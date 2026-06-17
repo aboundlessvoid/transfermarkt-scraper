@@ -24,11 +24,10 @@ def _throttle_settings():
     block rate without code edits:
 
         TFMKT_MAX_CONCURRENCY        (default 1)
-        TFMKT_MAX_TASKS_PER_MINUTE   (default 20  -> ~1 request / 3 s, mid of the
-                                      plan's 2-4 s target)
+        TFMKT_MAX_TASKS_PER_MINUTE   (default 40  -> ~1 request / 2 s)
     """
     max_concurrency = int(os.environ.get('TFMKT_MAX_CONCURRENCY', '1'))
-    max_tasks_per_minute = float(os.environ.get('TFMKT_MAX_TASKS_PER_MINUTE', '20'))
+    max_tasks_per_minute = float(os.environ.get('TFMKT_MAX_TASKS_PER_MINUTE', '40'))
     return ConcurrencySettings(
         min_concurrency=1,
         max_concurrency=max_concurrency,
@@ -113,9 +112,11 @@ def seasonize_href(item, season, base_url):
 def build_initial_requests(parents, season, base_url, label, spider_name):
     requests = []
     for item in parents:
-        # clubs extraction is best done on first_tier competition types only
-        if spider_name == 'clubs' and item.get('competition_type') != 'first_tier':
-            continue
+        # Clubs are scraped for league competitions of every tier: the clubs table
+        # is present on the season startseite for 2nd/3rd/4th-tier and youth leagues
+        # too, not just first_tier (verified empirically). Competitions that
+        # genuinely have no clubs table (placement stages, etc.) yield nothing and
+        # are handled gracefully by the clubs parser.
         seasoned_href = seasonize_href(item, season, base_url)
         item['seasoned_href'] = seasoned_href
         requests.append(

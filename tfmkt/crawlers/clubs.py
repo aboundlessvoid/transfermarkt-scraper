@@ -19,18 +19,28 @@ async def run(parents_arg=None, season=2024, base_url=None):
         parent = context.request.user_data['parent']
 
         def is_teams_table(table):
-            return table.css('th::text')[0].get().lower() == 'club'
+            ths = table.css('th::text').getall()
+            return bool(ths) and ths[0].strip().lower() == 'club'
 
         def extract_team_href(row):
-            return row.css('td')[1].css('a::attr(href)').get()
+            tds = row.css('td')
+            if len(tds) < 2:
+                return None
+            return tds[1].css('a::attr(href)').get()
 
         page_tables = context.selector.css('div.responsive-table')
         with_teams_info = [table for table in page_tables if is_teams_table(table)]
-        assert len(with_teams_info) == 1
+        if not with_teams_info:
+            # No clubs table on this page. Some competitions (placement / relegation
+            # stages, certain youth or cup-like wettbewerb) simply don't have one;
+            # yield nothing for this competition rather than failing the request.
+            return
 
         new_requests = []
         for row in with_teams_info[0].css('tbody tr'):
             href = extract_team_href(row)
+            if not href:
+                continue
             href_strip_season = re.sub('/saison_id/[0-9]{4}$', '', href)
 
             cb_data = {
