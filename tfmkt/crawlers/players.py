@@ -65,9 +65,12 @@ async def run(parents_arg=None, season=2024, base_url=None):
         attributes['name_in_home_country'] = sel.xpath(
             "//span[text()='Name in home country:']/following::span[1]/text()"
         ).get()
-        attributes['date_of_birth'] = sel.xpath(
-            "//span[@itemprop='birthDate']/text()"
-        ).get().strip().split(" (")[0]
+        # birthDate text is like "Jan 1, 1990 (35)", but some player pages omit it
+        # entirely (incomplete TM data, common on lower-tier players), so guard
+        # against a missing/empty value instead of calling .strip() on None.
+        birth_raw = sel.xpath("//span[@itemprop='birthDate']/text()").get()
+        birth_raw = birth_raw.strip() if birth_raw else None
+        attributes['date_of_birth'] = birth_raw.split(" (")[0].strip() if birth_raw else None
         attributes['place_of_birth'] = {
             'country': sel.xpath(
                 "//span[text()='Place of birth:']/following::span[1]/span/img/@title"
@@ -76,9 +79,10 @@ async def run(parents_arg=None, season=2024, base_url=None):
                 "//span[text()='Place of birth:']/following::span[1]/span/text()"
             ).get(),
         }
-        attributes['age'] = sel.xpath(
-            "//span[@itemprop='birthDate']/text()"
-        ).get().strip().split('(')[-1].split(')')[0]
+        attributes['age'] = (
+            birth_raw.split('(')[-1].split(')')[0].strip()
+            if birth_raw and '(' in birth_raw else None
+        )
         attributes['height'] = sel.xpath(
             "//span[text()='Height:']/following::span[1]/text()"
         ).get()
