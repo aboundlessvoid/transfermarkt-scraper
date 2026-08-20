@@ -1,13 +1,10 @@
 import json
 import re
-import logging
 from urllib.parse import unquote, urlparse
 
 from crawlee import Request
 
 from tfmkt.common import DEFAULT_BASE_URL, load_parents, build_initial_requests, safe_strip, create_crawler, check_failures
-
-logger = logging.getLogger(__name__)
 
 
 async def run(parents_arg=None, season=2024, base_url=None):
@@ -153,19 +150,16 @@ async def run(parents_arg=None, season=2024, base_url=None):
                 attributes['international_caps'] = safe_strip(caps_goals_values[0])
                 attributes['international_goals'] = safe_strip(caps_goals_values[1])
 
-        current_market_value_text = safe_strip(sel.xpath(
-            "//div[@class='tm-player-market-value-development__current-value']/text()"
-        ).get())
-        current_market_value_link = safe_strip(sel.xpath(
-            "//div[@class='tm-player-market-value-development__current-value']/a/text()"
-        ).get())
-        if current_market_value_text:
-            attributes['current_market_value'] = current_market_value_text
-        else:
-            attributes['current_market_value'] = current_market_value_link
-        attributes['highest_market_value'] = safe_strip(sel.xpath(
-            "//div[@class='tm-player-market-value-development__max-value']/text()"
-        ).get())
+        current_market_value, market_value_last_update = extract_current_market_value(sel)
+        attributes['current_market_value'] = current_market_value
+        attributes['market_value_last_update'] = market_value_last_update
+        # `highest_market_value` and `market_value_history` are NOT scrapeable from this
+        # page any more -- see extract_current_market_value. They are emitted as None to
+        # keep the record schema stable for consumers that already read the keys, and the
+        # values come from the separate market-value harvest instead. An explicit None is
+        # deliberate: the selectors that used to be here matched markup Transfermarkt has
+        # deleted, and a dead selector reads as "we tried" where this reads as a decision.
+        attributes['highest_market_value'] = None
 
         social_media_value_node = sel.xpath(
             "//span[text()='Social-Media:']/following::span[1]"
@@ -176,7 +170,7 @@ async def run(parents_arg=None, season=2024, base_url=None):
                 href = element.xpath('@href').get()
                 attributes['social_media'].append(href)
 
-        attributes['market_value_history'] = parse_market_history(sel, context.request.url)
+        attributes['market_value_history'] = None
         attributes['code'] = unquote(urlparse(base["href"]).path.split("/")[1])
 
         item = {**base, **attributes}
@@ -186,15 +180,49 @@ async def run(parents_arg=None, season=2024, base_url=None):
     check_failures(failures)
 
 
-def parse_market_history(selector, url):
-    pattern = re.compile(r'\'data\'\:.*\}\}]')
-    try:
-        parsed_script = json.loads(
-            '{' + selector.xpath(
-                "//script[contains(., 'series')]/text()"
-            ).re(pattern)[0].replace("\'", "\"").encode().decode('unicode_escape') + '}'
-        )
-        return parsed_script["data"]
-    except Exception:
-        logger.warning("Failed to scrape market value history from %s", url)
-        return None
+def extract_current_market_value(selector):
+    """``(current_market_value, last_update)`` from the profile page's data header.
+
+    **Transfermarkt no longer renders market values into the player page.** The block
+    this crawler used to read -- ``div.tm-player-market-value-development__current-value``,
+    its ``__max-value`` sibling, and the inline Highcharts ``series`` script behind the
+    graph -- has been replaced by a ``<tm-market-value-development-graph-integrated>``
+    custom element that fetches its own data client-side. Measured on live pages:
+    ``current-value``, ``max-value``, ``series`` and ``Highcharts`` each occur **zero**
+    times. No selector against this page or the ``/marktwertverlauf/`` one can recover
+    the history or the highest value; both come from the market-value harvest instead.
+
+    What *is* still server-rendered is the current value in the page header, and that is
+    what this reads. Note the markup::
+
+        <a class="data-header__market-value-wrapper">
+          <span class="waehrung">EUR</span>220.00<span class="waehrung">m</span>
+          <p class="data-header__last-update">Last update: 22/07/2026</p>
+        </a>
+
+    -- the value is split across THREE text nodes because the currency symbol and the
+    magnitude suffix are styled separately, so ``::text`` and ``.get()`` would return
+    only the middle chunk. This is the same trap that made ``games.py`` scrape ``"("``
+    as every half-time score, which is why the join here is explicit and the ``<p>`` is
+    excluded from it by name rather than by hoping it sorts last.
+
+    Players with no valuation at all (youth, lower tiers) have **no wrapper element** --
+    verified against a live page -- so an absent value is normal and returns
+    ``(None, None)``.
+    """
+    wrapper = selector.css('a.data-header__market-value-wrapper')
+    if not wrapper:
+        return None, None
+    wrapper = wrapper[0]
+
+    # Direct text nodes plus the currency <span>s, deliberately excluding the nested
+    # <p class="data-header__last-update">, which is returned separately.
+    value = ''.join(wrapper.xpath('./text() | ./span/text()').getall())
+    value = re.sub(r'\s+', '', value) or None
+
+    last_update = safe_strip(wrapper.css('p.data-header__last-update::text').get())
+    if last_update:
+        # Printed as "Last update: 22/07/2026"; keep the date, drop the label.
+        last_update = last_update.split(':', 1)[-1].strip() or None
+
+    return value, last_update

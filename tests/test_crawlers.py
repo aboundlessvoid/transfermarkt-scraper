@@ -8,6 +8,7 @@ Run one:     pytest tests/test_crawlers.py::test_confederations -v
 """
 
 import json
+import re
 import subprocess
 import sys
 
@@ -126,6 +127,29 @@ def test_players(tmp_path):
 
     # New: full_name should be present on most players
     assert any(item.get("full_name") for item in items)
+
+    # Market value: a senior first-tier squad must yield at least one real value, and
+    # every value that IS present must look like money. Asserting only that the key
+    # exists is what let all three market-value fields sit at NULL across 1.23 M
+    # records without a single test failing.
+    assert any(item.get("current_market_value") for item in items), \
+        "no player in a first-tier squad has a current market value"
+    for item in items:
+        value = item.get("current_market_value")
+        if value is not None:
+            assert re.match(r"^\D*[\d.,]+\D*$", value), f"bad market value: {value!r}"
+        last_update = item.get("market_value_last_update")
+        if last_update is not None:
+            assert re.match(r"^\d{2}/\d{2}/\d{4}$", last_update), \
+                f"bad market value date: {last_update!r}"
+
+    # `highest_market_value` and `market_value_history` are deliberately None on every
+    # record: Transfermarkt renders them client-side and they come from the separate
+    # market-value harvest. Pinned so that "they are NULL" stays a decision rather than
+    # drifting back into an undetected defect.
+    for item in items:
+        assert item["highest_market_value"] is None
+        assert item["market_value_history"] is None
 
     # New: additional_citizenships only present for multi-citizenship players (soft check)
     # New: national_team only for international players (soft check)
@@ -267,9 +291,20 @@ def test_games(tmp_path):
     # New: referee_href
     assert "referee_href" in game
 
-    # New: half_time_score and kickoff_time (may be None but key should exist)
-    assert "half_time_score" in game
+    # half_time_score / result_type: assert the VALUE's shape, not the key's presence.
+    # This used to read `assert "half_time_score" in game`, which passed for seven
+    # seasons while the field was the single character "(" on 540,832 records.
     assert "kickoff_time" in game
+    assert game["half_time_score"] != "(", "the sb-halbzeit ::text defect is back"
+    if game["half_time_score"] is not None:
+        assert re.match(r"^\d+:\d+$", game["half_time_score"]), \
+            f"half_time_score is not a score: {game['half_time_score']!r}"
+    # A played game has one or the other, never both: the site prints a half-time score
+    # OR a note saying how the result came about, in the same element.
+    assert game["half_time_score"] is None or game["result_type"] is None
+    if game["result_type"] is not None:
+        assert game["result_type"] in ("AET", "on pens", "uncontested"), \
+            f"unknown result_type: {game['result_type']!r}"
 
     # New: manager hrefs (if managers are present)
     if "home_manager" in game:

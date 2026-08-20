@@ -6,6 +6,49 @@ from crawlee import Request
 from tfmkt.common import DEFAULT_BASE_URL, load_parents, build_initial_requests, safe_strip, create_crawler, check_failures
 from tfmkt.utils import background_position_in_px_to_minute
 
+#: A half-time score as Transfermarkt prints it under the full-time one: "(1:0)".
+#: Whitespace is permitted everywhere inside the brackets, because the score is assembled
+#: from several text nodes and how they are indented is the site's business, not ours.
+HALF_TIME_RE = re.compile(r'\(\s*(\d+)\s*:\s*(\d+)\s*\)')
+
+
+def extract_result_annotation(result_box):
+    """``(half_time_score, result_type)`` from a match report's ``div.ergebnis-wrap``.
+
+    The annotation under the full-time score lives in ``div.sb-halbzeit`` and is ONE
+    element carrying TWO different facts:
+
+    * a half-time score, marked up as ``(<span>0:</span>2)`` -- **three** text nodes;
+    * or one of the literals ``AET`` / ``on pens`` / ``(uncontested)``, which say how the
+      match was decided and mean there is no half-time score printed at all.
+
+    This used to be ``css('div.sb-halbzeit::text').get()``, which returns the *first*
+    text node -- so every normal game yielded the bare opening bracket ``"("`` and the
+    half-time score was never scraped. Joining all descendant text is what fixes it, and
+    it must be a join rather than a nicer-looking index: the score is split across the
+    element and a nested ``<span>`` precisely because Transfermarkt styles the two halves
+    differently.
+
+    The sibling ``div.sb-endstand`` has the same shape and is nonetheless read correctly
+    by ``::text`` -- there the first text node genuinely is the full-time score. That
+    coincidence is why this went unnoticed; do not copy the pattern.
+    """
+    half_time_box = result_box.css('div.sb-halbzeit')
+    if not half_time_box:
+        return None, None
+
+    raw = re.sub(r'\s+', ' ', ''.join(half_time_box[0].xpath('.//text()').getall())).strip()
+    if not raw:
+        return None, None
+
+    match = HALF_TIME_RE.fullmatch(raw)
+    if match:
+        return f"{match.group(1)}:{match.group(2)}", None
+    # Not a score: an annotation about how the result came about. Kept verbatim apart
+    # from the brackets Transfermarkt wraps some of them in, so consumers see
+    # "uncontested" rather than "(uncontested)" beside a bare "AET".
+    return None, raw.strip('()').strip() or None
+
 
 def extract_game_events(selector, event_type):
     event_elements = selector.xpath(
@@ -106,8 +149,16 @@ async def run(parents_arg=None, season=2024, base_url=None):
         # gesamtspielplan link, but the schedule lives at the same path with
         # `/startseite/` swapped for `/gesamtspielplan/` (e.g. Copa America,
         # World Cup). Derive it directly from the parent edition href.
+        #
+        # Derive it from `seasoned_href`, NOT from the bare `href`: the bare one carries
+        # no season, so the derived URL 302s to whatever the current season is and the
+        # crawler silently scrapes zero games for every past season it is asked for.
+        # `build_initial_requests` has already computed the seasoned URL — it is an
+        # absolute URL, hence the base strip, since callers re-prepend the base below.
         if not next_url:
-            parent_href = parent.get('href', '')
+            parent_href = parent.get('seasoned_href') or parent.get('href', '')
+            if parent_href.startswith(base_url):
+                parent_href = parent_href[len(base_url):]
             if '/startseite/' in parent_href:
                 next_url = parent_href.replace('/startseite/', '/gesamtspielplan/')
 
@@ -191,7 +242,7 @@ async def run(parents_arg=None, season=2024, base_url=None):
 
         result_box = game_box.css('div.ergebnis-wrap')
         result = safe_strip(result_box.css('div.sb-endstand::text').get())
-        half_time_score = safe_strip(result_box.css('div.sb-halbzeit::text').get())
+        half_time_score, result_type = extract_result_annotation(result_box)
 
         # Kickoff time - search for time pattern in the date/time area
         kickoff_time = None
@@ -233,6 +284,9 @@ async def run(parents_arg=None, season=2024, base_url=None):
             'away_club_position': away_club_position,
             'result': result,
             'half_time_score': half_time_score,
+            # How the match was decided, when the site says so: "AET", "on pens",
+            # "uncontested". None for an ordinary game. See extract_result_annotation.
+            'result_type': result_type,
             'matchday': matchday,
             'date': date,
             'kickoff_time': kickoff_time,

@@ -1,0 +1,6 @@
+# Test fixtures are byte-faithful captures of live Transfermarkt pages, CRLF and all.
+# `-text` disables newline conversion in both directions, so a checkout on Linux (CI) and
+# one on Windows (core.autocrlf=true) read the exact bytes the parsers were verified
+# against. Without this the fixtures silently differ per platform, which is the one thing
+# a fixture must never do.
+tests/fixtures/*.html -text

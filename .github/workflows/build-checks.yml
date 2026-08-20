@@ -35,6 +35,13 @@ jobs:
     - name: Verify confederations crawler
       run: |
         poetry run python -m tfmkt confederations
-    - name: Run tests
+    # Offline parser tests first: they need no network, run in under a second, and are
+    # the ones that fail when a parser stops extracting a value. Running them ahead of
+    # the live suite means a parser regression is reported as itself rather than as a
+    # symptom of whichever Transfermarkt page happened to be flaky that morning.
+    - name: Run parser tests (offline)
+      run: |
+        poetry run python -m pytest tests/test_parsers.py -v
+    - name: Run crawler tests (live site)
       run: |
         poetry run python -m pytest tests/test_crawlers.py -v
