@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 
 from crawlee import Request
@@ -11,16 +12,26 @@ from tfmkt.utils import background_position_in_px_to_minute
 #: from several text nodes and how they are indented is the site's business, not ours.
 HALF_TIME_RE = re.compile(r'\(\s*(\d+)\s*:\s*(\d+)\s*\)')
 
+#: The only things Transfermarkt prints in `sb-halbzeit` *instead of* a half-time score.
+#: Keyed by their lowercased form because the brackets around "(uncontested)" are already
+#: stripped by the time we look, and the site is not consistent about case.
+RESULT_TYPES = {'aet': 'AET', 'on pens': 'on pens', 'uncontested': 'uncontested'}
+
+logger = logging.getLogger(__name__)
+
 
 def extract_result_annotation(result_box):
     """``(half_time_score, result_type)`` from a match report's ``div.ergebnis-wrap``.
 
     The annotation under the full-time score lives in ``div.sb-halbzeit`` and is ONE
-    element carrying TWO different facts:
+    element carrying THREE different facts:
 
     * a half-time score, marked up as ``(<span>0:</span>2)`` -- **three** text nodes;
     * or one of the literals ``AET`` / ``on pens`` / ``(uncontested)``, which say how the
-      match was decided and mean there is no half-time score printed at all.
+      match was decided and mean there is no half-time score printed at all;
+    * or an *empty* bracket pair, ``( : )``, meaning the site simply has no half-time
+      score for this game. That is neither a score nor an annotation, and it is the case
+      a two-way branch here gets wrong -- see the comment on the fall-through below.
 
     This used to be ``css('div.sb-halbzeit::text').get()``, which returns the *first*
     text node -- so every normal game yielded the bare opening bracket ``"("`` and the
@@ -44,10 +55,25 @@ def extract_result_annotation(result_box):
     match = HALF_TIME_RE.fullmatch(raw)
     if match:
         return f"{match.group(1)}:{match.group(2)}", None
-    # Not a score: an annotation about how the result came about. Kept verbatim apart
-    # from the brackets Transfermarkt wraps some of them in, so consumers see
-    # "uncontested" rather than "(uncontested)" beside a bare "AET".
-    return None, raw.strip('()').strip() or None
+    # Not a score. Only a KNOWN annotation counts as a result_type. An empty bracket
+    # pair -- "( : )", with non-breaking spaces, is how the site renders a game it has
+    # no half-time score for, and it says nothing about how the match was decided.
+    #
+    # This used to be a catch-all `return None, raw.strip('()').strip()`, which turned
+    # every one of those into the result_type ":" -- 1,259 of them in seasons 2025-2026
+    # alone -- purely because stripping the brackets off "( : )" leaves a colon behind.
+    #
+    # Returning two Nones loses nothing: the page genuinely carries no half-time score
+    # for these games, which is why the junk was spread evenly across every full-time
+    # scoreline instead of clustering anywhere.
+    annotation = raw.strip('()').strip()
+    result_type = RESULT_TYPES.get(annotation.lower())
+    if result_type is None and annotation:
+        # An unrecognised annotation is either a new site literal worth supporting or a
+        # parse that has gone wrong. Either way it should be visible rather than written
+        # into the corpus verbatim -- the absence of this line is why ":" went unnoticed.
+        logger.warning("Unrecognised sb-halbzeit annotation, dropping: %r", annotation)
+    return None, result_type
 
 
 def extract_game_events(selector, event_type):
